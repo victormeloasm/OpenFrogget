@@ -4,7 +4,10 @@
 ![Language](https://img.shields.io/badge/language-C%2B%2B20-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux-green.svg)
 
----
+<p align="center">
+  <img src="assets/frog.png" alt="Openfrogget Logo" width="200"/>
+</p>
+
 
 ## 🚀 **Introduction**
 
@@ -40,6 +43,10 @@ Curve coefficient a: -7 mod p
 Curve coefficient b: 95864189850957917703933006131793785649240252916618759767550461391845895018181
 Generator point (G) and order (n): Securely selected and detailed clearly in eccfrog512ck2 implementation.
 ```
+
+<p align="center">
+  <img src="assets/curve.png" alt="curve" width="200"/>
+</p>
 
 ---
 
