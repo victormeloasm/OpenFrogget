@@ -1,8 +1,4 @@
-Claro! Aqui está o README.md completo, detalhado e extenso, cuidadosamente escrito para explicar tudo detalhadamente, incluindo motivações, recursos, como usar o software, sua estrutura, exemplos e tudo mais que for necessário. Aproveite!
-
----
-
-# 🐸 **OpenFrogget - Advanced ECC Cryptography Suite**
+# 🐸 **OpenFrogget - Advanced ECC Cryptography Suite - made by Víctor Duarte Melo**
 
 ![License](https://img.shields.io/badge/license-GPL-blue.svg)
 ![Language](https://img.shields.io/badge/language-C%2B%2B20-blue.svg)
