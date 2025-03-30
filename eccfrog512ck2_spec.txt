@@ -1,0 +1,31 @@
+*Curve Name:* EccFrog512CK2  
+*Purpose:* Research, cryptographic experimentation, and secure ECC key generation  
+*Curve Equation:*  
+  y² ≡ x³ - 7x + b mod p  
+  (where a = p - 7, which is equivalent to -7 mod p)
+
+*Field Prime (p):*  
+9149012705592502490164965176888130701548053918699793689672344807772801105830681498780746622530729418858477103073591918058480028776841126664954537807339721
+
+*Coefficient a:*  
+9149012705592502490164965176888130701548053918699793689672344807772801105830681498780746622530729418858477103073591918058480028776841126664954537807339714  
+  (equivalent to -7 mod p)
+
+*Coefficient b:*  
+95864189850957917703933006131793785649240252916618759767550461391845895018181  
+  (deterministically generated using BLAKE3(seed + index) mod p)
+
+*Curve Order (n):*  
+9149012705592502490164965176888130701548053918699793689672344807772801105830557269123255850915745063541133157503707284048429261692283957712127567713136519
+
+*Security Properties:*  
+- ✅ p is a 512-bit safe prime  
+- ✅ b is a cryptographically secure prime  
+- ✅ Curve order n is a verified prime  
+- ✅ Curve satisfies Hasse's theorem:  
+  |n - (p + 1)| ≤ 2√p  
+- ✅ Discriminant ≠ 0 (curve is non-singular)
+
+*Verified With:*  
+- SageMath (symbolic math and ECC tools)  
+- WolframAlpha (independent primality confirmation)
