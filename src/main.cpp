@@ -1,3 +1,5 @@
+//Made by Victor Duarte Melo 30/03/2025
+
 #include "encrypt.h"
 #include "decrypt.h"
 #include "keygen.h"
