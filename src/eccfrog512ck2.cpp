@@ -1,230 +1,206 @@
-#include "eccfrog512ck2.h"
-#include <sstream>
-#include <iomanip>
-#include <stdexcept>
-#include <openssl/sha.h>
+#include "eccfrog512ck2.hpp"
+#include <chrono>
 #include <iostream>
-#include <algorithm>
+#include <blake3.h>
 
-// Helper function to clean PGP armored data
-static std::string clean_pgp_data(const std::string& pgp_data) {
-    std::string cleaned;
-    for (char c : pgp_data) {
-        if (isxdigit(c)) {
-            cleaned += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+ECCFrog512CK2::ECCFrog512CK2()
+    : p("13407807929942597099574024998205846127479365820592393377723561443721764030073546976801874298166903427690031858186486050853753882811946569946433649006084171"),
+      a("-7"),
+      Gx("8738379852674060893335160669390950305573653783231030656544726305066230810328881024010886931317627508773245362380938677755754448451420325817972750886722371"),
+      Gy("10104906652111556042420230041540564410479008895503871920234628893113479746324902980450282449515434382420807421477792784494545955741858630434485376637406642"),
+      n("13407807929942597099574024998205846127479365820592393377723561443720917119732220222937674194194655218914977121741651673281619388251992476346242122033284439"),
+      b([this]() {
+          const std::string seed = "ECCFrog512CK2 forever";
+          uint8_t hash[32];
+          blake3_hasher hasher;
+          blake3_hasher_init(&hasher);
+          blake3_hasher_update(&hasher, seed.data(), seed.size());
+          blake3_hasher_finalize(&hasher, hash, 32);
+          mpz_class result;
+          mpz_import(result.get_mpz_t(), 32, 1, 1, 1, 0, hash);
+          result %= p;
+          return result;
+      }())
+{
+    sodium_init();
+}
+
+std::pair<mpz_class, std::pair<mpz_class, mpz_class>> ECCFrog512CK2::generate_keypair() {
+    unsigned char seed[64];
+    randombytes_buf(seed, sizeof(seed));
+    mpz_class priv;
+    mpz_import(priv.get_mpz_t(), sizeof(seed), 1, 1, 1, 0, seed);
+    priv %= n;
+    auto pub = scalar_mult_montgomery(priv, Gx, Gy);
+    return {priv, pub};
+}
+
+std::vector<int> ECCFrog512CK2::naf(mpz_class k) {
+    std::vector<int> naf_repr;
+    mpz_class zero = 0;
+    while (k > 0) {
+        if (k % 2 != 0) {
+            int z = 2 - (k % 4).get_si();
+            naf_repr.push_back(z);
+            k -= z;
+        } else {
+            naf_repr.push_back(0);
         }
+        k /= 2;
     }
-    return cleaned;
+    return naf_repr;
 }
 
-ECCFrog512CK2::Point::Point() : x(0), y(0), at_infinity(true) {}
+std::pair<mpz_class, mpz_class> ECCFrog512CK2::scalar_mult_NAF(mpz_class k, mpz_class x, mpz_class y) {
+    std::vector<int> naf_k = naf(k);
+    mpz_class rx = 0, ry = 0;
+    bool started = false;
 
-ECCFrog512CK2::Point::Point(const mpz_class& x_val, const mpz_class& y_val)
-    : x(x_val), y(y_val), at_infinity(false) {}
-
-std::string ECCFrog512CK2::Point::to_string() const {
-    if (at_infinity) return "Point(infinity)";
-    std::ostringstream oss;
-    oss << "(" << x.get_str() << ", " << y.get_str() << ")";
-    return oss.str();
-}
-
-std::string ECCFrog512CK2::Point::to_compressed_hex() const {
-    if (at_infinity) return "00";
-    std::ostringstream oss;
-    int parity = mpz_tstbit(y.get_mpz_t(), 0);
-    oss << (parity ? "03" : "02");
-
-    std::string x_hex = x.get_str(16);
-    if (x_hex.length() > 128) {
-        throw std::runtime_error("x coordinate too large");
-    }
-    x_hex.insert(0, 128 - x_hex.length(), '0');
-    oss << x_hex;
-
-    return oss.str();
-}
-
-std::vector<unsigned char> ECCFrog512CK2::Point::to_uncompressed_bytes() const {
-    if (at_infinity) {
-        return {0x00};
-    }
-
-    std::vector<unsigned char> bytes(129);
-    bytes[0] = 0x04; // Uncompressed prefix
-
-    std::string x_hex = x.get_str(16);
-    x_hex.insert(0, 128 - x_hex.length(), '0');
-    for (int i = 0; i < 64; ++i) {
-        unsigned long xbyte = std::stoul(x_hex.substr(i * 2, 2), nullptr, 16);
-        bytes[1 + i] = static_cast<unsigned char>(xbyte);
-    }
-
-    std::string y_hex = y.get_str(16);
-    y_hex.insert(0, 128 - y_hex.length(), '0');
-    for (int i = 0; i < 64; ++i) {
-        unsigned long ybyte = std::stoul(y_hex.substr(i * 2, 2), nullptr, 16);
-        bytes[65 + i] = static_cast<unsigned char>(ybyte);
-    }
-
-    return bytes;
-}
-
-ECCFrog512CK2::ECCFrog512CK2() {
-    p = mpz_class("9149012705592502490164965176888130701548053918699793689672344807772801105830681498780746622530729418858477103073591918058480028776841126664954537807339721");
-    a = p - 7;
-    b = mpz_class("95864189850957917703933006131793785649240252916618759767550461391845895018181");
-    n = mpz_class("9149012705592502490164965176888130701548053918699793689672344807772801105830557269123255850915745063541133157503707284048429261692283957712127567713136519");
-    h = 1;
-
-    G = Point(
-        mpz_class("8426241697659200371183582771153260966569955699615044232640972423431947060129573736112298744977332416175021337082775856058058394786264506901662703740544432"),
-        mpz_class("4970129934163735248083452609809843496231929620419038489506391366136186485994288320758668172790060801809810688192082146431970683113557239433570011112556001")
-    );
-}
-
-ECCFrog512CK2::Point ECCFrog512CK2::infinity() const {
-    return Point();
-}
-
-ECCFrog512CK2::Point ECCFrog512CK2::add_points(const Point& P, const Point& Q) const {
-    if (P.at_infinity) return Q;
-    if (Q.at_infinity) return P;
-    if (P.x == Q.x && (P.y != Q.y || P.y == 0)) return infinity();
-
-    mpz_class lambda;
-    if (P.x == Q.x) {
-        mpz_class denom = (2 * P.y) % p;
-        mpz_class denom_inv;
-        if (!mpz_invert(denom_inv.get_mpz_t(), denom.get_mpz_t(), p.get_mpz_t())) {
-            return infinity();
+    for (ssize_t i = naf_k.size() - 1; i >= 0; --i) {
+        if (started) {
+            mpz_class lambda, den;
+            mpz_invert(den.get_mpz_t(), (2 * ry).get_mpz_t(), p.get_mpz_t());
+            lambda = ((3 * rx * rx + a) * den) % p;
+            mpz_class x2 = (lambda * lambda - 2 * rx) % p;
+            mpz_class y2 = (lambda * (rx - x2) - ry) % p;
+            rx = (x2 + p) % p;
+            ry = (y2 + p) % p;
         }
-        lambda = (3 * P.x * P.x + a) * denom_inv % p;
-    } else {
-        mpz_class denom = (Q.x - P.x) % p;
-        mpz_class denom_inv;
-        if (!mpz_invert(denom_inv.get_mpz_t(), denom.get_mpz_t(), p.get_mpz_t())) {
-            return infinity();
+
+        if (naf_k[i] == 0) continue;
+
+        mpz_class qx = x, qy = (naf_k[i] > 0 ? y : (-y + p) % p);
+        if (!started) {
+            rx = qx;
+            ry = qy;
+            started = true;
+            continue;
         }
-        lambda = (Q.y - P.y) * denom_inv % p;
-    }
 
-    mpz_class xr = (lambda * lambda - P.x - Q.x) % p;
-    mpz_class yr = (lambda * (P.x - xr) - P.y) % p;
-    if (xr < 0) xr += p;
-    if (yr < 0) yr += p;
-
-    return Point(xr, yr);
-}
-
-ECCFrog512CK2::Point ECCFrog512CK2::scalar_mul(const Point& P, const mpz_class& k) const {
-    Point R = infinity();
-    Point Q = P;
-    mpz_class scalar = k;
-
-    if (scalar < 0) {
-        throw std::runtime_error("Invalid scalar: negative value");
-    }
-
-    while (scalar > 0) {
-        if (mpz_tstbit(scalar.get_mpz_t(), 0)) {
-            R = add_points(R, Q);
+        mpz_class lambda, den;
+        if (rx == qx) {
+            mpz_invert(den.get_mpz_t(), (2 * ry).get_mpz_t(), p.get_mpz_t());
+            lambda = ((3 * rx * rx + a) * den) % p;
+        } else {
+            mpz_invert(den.get_mpz_t(), (qx - rx + p).get_mpz_t(), p.get_mpz_t());
+            lambda = ((qy - ry + p) * den) % p;
         }
-        Q = add_points(Q, Q);
-        scalar >>= 1;
+
+        mpz_class x3 = (lambda * lambda - rx - qx) % p;
+        mpz_class y3 = (lambda * (rx - x3) - ry) % p;
+        rx = (x3 + p) % p;
+        ry = (y3 + p) % p;
     }
-    return R;
+
+    return {rx, ry};
 }
 
-ECCFrog512CK2::Point ECCFrog512CK2::point_from_compressed_hex(const std::string& hex) const {
-    std::string clean_hex = clean_pgp_data(hex);
+std::pair<mpz_class, mpz_class> ECCFrog512CK2::scalar_mult_montgomery(mpz_class k, mpz_class x, mpz_class y) {
+    mpz_class x1 = x, x2 = 0, z2 = 1, x3 = x, z3 = 0;
+    mpz_class A = a;
+    mpz_class t1, t2, t3, t4;
+    bool swap = false;
 
-    if (clean_hex.size() != 66 ||
-       (clean_hex.substr(0, 2) != "02" &&
-        clean_hex.substr(0, 2) != "03")) {
-        throw std::runtime_error("Invalid compressed point format: must be 66 hex chars starting with 02/03");
+    for (ssize_t i = mpz_sizeinbase(k.get_mpz_t(), 2) - 1; i >= 0; --i) {
+        bool ki = mpz_tstbit(k.get_mpz_t(), i);
+        if (swap != ki) {
+            std::swap(x2, x3);
+            std::swap(z2, z3);
+            swap = ki;
+        }
+
+        t1 = (x2 + z2) % p;
+        t2 = (x2 - z2 + p) % p;
+        t3 = (x3 + z3) % p;
+        t4 = (x3 - z3 + p) % p;
+        mpz_class t5 = (t1 * t4) % p;
+        mpz_class t6 = (t2 * t3) % p;
+
+        x3 = ((t5 + t6) * (t5 + t6)) % p;
+        z3 = (x1 * ((t5 - t6) * (t5 - t6))) % p;
+        mpz_class t7 = (t1 * t1) % p;
+        mpz_class t8 = (t2 * t2) % p;
+        x2 = (t7 * t8) % p;
+        z2 = ((t7 - t8) * ((t7 - t8 + A * ((t7 - t8) % p)) % p)) % p;
     }
 
-    mpz_class x(clean_hex.substr(2), 16);
-    if (x >= p) {
-        throw std::runtime_error("x coordinate exceeds field size");
-    }
+    if (swap) std::swap(x2, x3), std::swap(z2, z3);
 
-    mpz_class y_sq = (x*x*x + a*x + b) % p;
+    mpz_class zinv;
+    mpz_invert(zinv.get_mpz_t(), z2.get_mpz_t(), p.get_mpz_t());
+    x2 = (x2 * zinv) % p;
+    mpz_class y2 = (x2 * x2 * x2 + a * x2 + b) % p;
+    mpz_sqrt(y2.get_mpz_t(), y2.get_mpz_t());
 
-    mpz_class y;
-    mpz_class exponent = (p + 1) / 4;
-    mpz_powm(y.get_mpz_t(), y_sq.get_mpz_t(), exponent.get_mpz_t(), p.get_mpz_t());
-
-    bool y_parity = mpz_tstbit(y.get_mpz_t(), 0);
-    bool desired_parity = (clean_hex.substr(0, 2) == "03");
-
-    if (y_parity != desired_parity) {
-        y = p - y;
-    }
-
-    mpz_class check = (y*y) % p;
-    mpz_class expected = (x*x*x + a*x + b) % p;
-    if (check != expected) {
-        throw std::runtime_error("Derived point not on curve");
-    }
-
-    return Point(x, y);
+    return {x2, y2};
 }
 
-ECCFrog512CK2::Point ECCFrog512CK2::point_from_uncompressed(const std::vector<unsigned char>& bytes) const {
-    if (bytes.size() != 129 || bytes[0] != 0x04) {
-        throw std::runtime_error("Invalid uncompressed format: must be 129 bytes starting with 0x04");
-    }
+std::string ECCFrog512CK2::compress(std::pair<mpz_class, mpz_class> point) {
+    return (mpz_even_p(point.second.get_mpz_t()) ? "02" : "03") + point.first.get_str(16);
+}
 
-    mpz_class x;
-    std::string x_hex;
-    for (int i = 1; i <= 64; ++i) {
-        char buf[3];
-        snprintf(buf, sizeof(buf), "%02x", bytes[i]);
-        x_hex += buf;
-    }
-    x.set_str(x_hex, 16);
-
-    mpz_class y;
-    std::string y_hex;
-    for (int i = 65; i <= 128; ++i) {
-        char buf[3];
-        snprintf(buf, sizeof(buf), "%02x", bytes[i]);
-        y_hex += buf;
-    }
-    y.set_str(y_hex, 16);
-
+bool ECCFrog512CK2::is_on_curve(mpz_class x, mpz_class y) {
     mpz_class lhs = (y * y) % p;
-    mpz_class rhs = (x*x*x + a*x + b) % p;
-    if (lhs != rhs) {
-        throw std::runtime_error("Point not on curve");
-    }
-
-    return Point(x, y);
+    mpz_class rhs = (x * x * x + a * x + b) % p;
+    return (lhs == rhs);
 }
 
-ECCFrog512CK2::Point ECCFrog512CK2::point_from_pgp(const std::string& pgp_data) const {
-    std::string clean_hex = clean_pgp_data(pgp_data);
+bool ECCFrog512CK2::is_twist_secure() {
+    // Apenas simulado: sabemos que o twist não é primo
+    return false;
+}
 
-    if (clean_hex.empty()) {
-        throw std::runtime_error("Empty PGP data");
+void ECCFrog512CK2::benchmark() {
+    auto start = std::chrono::high_resolution_clock::now();
+    scalar_mult_montgomery(123456789, Gx, Gy);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::cout << "Montgomery Time: "
+              << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()
+              << " µs\n";
+
+    start = std::chrono::high_resolution_clock::now();
+    scalar_mult_NAF(123456789, Gx, Gy);
+    end = std::chrono::high_resolution_clock::now();
+    std::cout << "NAF Time: "
+              << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()
+              << " µs\n";
+}
+std::pair<mpz_class, mpz_class> ECCFrog512CK2::endomorphism(mpz_class x, mpz_class y) {
+    // β ≡ 2^((p-1)/3) mod p
+    static mpz_class beta;
+    if (beta == 0) {
+        mpz_class exp = (p - 1) / 3;
+        mpz_powm(beta.get_mpz_t(), mpz_class(2).get_mpz_t(), exp.get_mpz_t(), p.get_mpz_t());
+    }
+    mpz_class new_x = (beta * x) % p;
+    return {new_x, y};
+}
+
+std::pair<mpz_class, mpz_class> ECCFrog512CK2::scalar_mult_GLV(mpz_class k, mpz_class x, mpz_class y) {
+    // Decomposição simples para simular GLV: k1 = k/2, k2 = k - k1
+    mpz_class k1 = k / 2;
+    mpz_class k2 = k - k1;
+
+    auto P1 = scalar_mult_montgomery(k1, x, y);
+    auto endo = endomorphism(x, y);
+    auto P2 = scalar_mult_montgomery(k2, endo.first, endo.second);
+
+    // Somar P1 + P2
+    mpz_class lambda, num, den;
+
+    if (P1.first == P2.first && P1.second == P2.second) {
+        num = (3 * P1.first * P1.first + a) % p;
+        den = (2 * P1.second) % p;
+    } else {
+        num = (P2.second - P1.second + p) % p;
+        den = (P2.first - P1.first + p) % p;
     }
 
-    if (clean_hex.size() == 66 &&
-       (clean_hex.substr(0, 2) == "02" ||
-        clean_hex.substr(0, 2) == "03")) {
-        return point_from_compressed_hex(clean_hex);
-    }
-    else if (clean_hex.size() == 258 && clean_hex.substr(0, 2) == "04") {
-        std::vector<unsigned char> bytes;
-        for (size_t i = 0; i < clean_hex.length(); i += 2) {
-            bytes.push_back(static_cast<unsigned char>(
-                std::stoul(clean_hex.substr(i, 2), nullptr, 16)));
-        }
-        return point_from_uncompressed(bytes);
-    }
-    else {
-        throw std::runtime_error("Unrecognized PGP key format");
-    }
+    mpz_invert(den.get_mpz_t(), den.get_mpz_t(), p.get_mpz_t());
+    lambda = (num * den) % p;
+
+    mpz_class xr = (lambda * lambda - P1.first - P2.first + 2 * p) % p;
+    mpz_class yr = (lambda * (P1.first - xr + p) - P1.second + p) % p;
+
+    return {xr, yr};
 }
